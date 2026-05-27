@@ -195,11 +195,13 @@ def _compare_from_disk(out_root: Path, bits_levels: Sequence[int]) -> Dict[str, 
             ],
         ],
     )
-    return {
+    comparison = {
         "baseline": {"memory_mb": base_mem_mb, "perplexity": base_ppl},
         "quantized": results,
         "output_root": str(out_root),
     }
+    save_json(comparison, out_root / "comparison.json")
+    return comparison
 
 
 def run_quantization_experiment(

@@ -239,7 +239,9 @@ def _compare_from_disk(out_root: Path, strategy_names: Sequence[str]) -> Dict[st
             ],
         ],
     )
-    return {"baseline_memory_mb": base_mem_mb, "baseline_perplexity": base_ppl, "results": results, "output_root": str(out_root)}
+    comparison = {"baseline_memory_mb": base_mem_mb, "baseline_perplexity": base_ppl, "results": results, "output_root": str(out_root)}
+    save_json(comparison, out_root / "comparison.json")
+    return comparison
 
 
 def run_sliding_quantization_experiment(

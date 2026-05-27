@@ -50,7 +50,7 @@ def load_experiment_prompt(
     input_text = example["input_text"]
     expected_output_text = example["expected_output_text"]
 
-    if _use_chat_template(model_name) and hasattr(tokenizer, "apply_chat_template"):
+    if _use_chat_template(model_name) and hasattr(tokenizer, "apply_chat_template") and getattr(tokenizer, "chat_template", None):
         messages = [{"role": "user", "content": input_text}]
         prompt_ids = tokenizer.apply_chat_template(
             messages,

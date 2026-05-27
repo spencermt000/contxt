@@ -37,6 +37,11 @@ from layer import run_layer_kv_experiment  # noqa: E402
 from quantization import run_quantization_experiment  # noqa: E402
 from sliding_quantization import run_sliding_quantization_experiment  # noqa: E402
 
+_CONTEXT_DIR = _REPO / "experiments" / "context-management"
+if str(_CONTEXT_DIR) not in sys.path:
+    sys.path.insert(0, str(_CONTEXT_DIR))
+from compressed_attention import run_compressed_attention_experiment  # noqa: E402
+
 
 # Default matrix: IDs must match what you have on disk / HF for the target host.
 DEFAULT_MODELS: tuple[str, ...] = (
@@ -130,6 +135,13 @@ def main() -> None:
         if "sliding" not in skip:
             print("\n>>> sliding_quantization")
             run_sliding_quantization_experiment(
+                model_name=model_name,
+                device=args.device,
+                max_new_tokens=args.max_new_tokens,
+            )
+        if "compressed" not in skip:
+            print("\n>>> compressed_attention")
+            run_compressed_attention_experiment(
                 model_name=model_name,
                 device=args.device,
                 max_new_tokens=args.max_new_tokens,

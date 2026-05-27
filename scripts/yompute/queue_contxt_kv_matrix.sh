@@ -100,9 +100,31 @@ if [[ -n "${MATRIX_MODELS:-}" ]]; then
   MATRIX_ENV+=( -e "MATRIX_MODELS=${MATRIX_MODELS}" )
 fi
 
+# Check scheduler: wait until no GPU job is running before launching.
+echo "Checking GPU availability via scheduler…"
+ssh "${YOMPUTE_HOST}" 'python3 -c "
+import urllib.request, json, time, sys
+for attempt in range(60):
+    try:
+        r = urllib.request.urlopen(\"http://localhost:8890/status\", timeout=5)
+        d = json.loads(r.read())
+        jobs = d.get(\"gpu_jobs\", 0)
+        if jobs == 0:
+            print(\"GPU free — proceeding.\")
+            sys.exit(0)
+        print(f\"GPU busy ({jobs} job(s)) — waiting 30s…\")
+    except Exception as e:
+        print(f\"Scheduler unreachable: {e} — proceeding anyway.\")
+        sys.exit(0)
+    time.sleep(30)
+print(\"Timed out waiting for GPU.\")
+sys.exit(1)
+"'
+
 if [[ "${QUEUE_BACKGROUND:-0}" == "1" ]]; then
   echo "Background mode: log -> ${REMOTE_LOG}"
   ssh "${YOMPUTE_HOST}" "nohup docker run --rm --gpus all \
+    --label yompute.gpu=true \
     -v '${REMOTE_CHECKOUT}:/workspace' \
     -v '${REMOTE_RUNS}:${REMOTE_RUNS}' \
     ${MOUNT_HF[@]+"${MOUNT_HF[@]}"} \
@@ -114,7 +136,6 @@ if [[ "${QUEUE_BACKGROUND:-0}" == "1" ]]; then
     -w /workspace \
     yompute/pytorch-gpu \
     bash -lc 'set -euo pipefail
-      python3 -m pip install --quiet transformers==4.44.2 sentencepiece accelerate bitsandbytes
       python3 experiments/kv-cache-shortcuts/run_kv_matrix.py' \
     >'${REMOTE_LOG}' 2>&1 &"
   echo "Queued. Tail: ssh ${YOMPUTE_HOST} 'tail -f ${REMOTE_LOG}'"
@@ -122,6 +143,7 @@ if [[ "${QUEUE_BACKGROUND:-0}" == "1" ]]; then
 fi
 
 ssh "${YOMPUTE_HOST}" "docker run --rm --gpus all \
+  --label yompute.gpu=true \
   -v '${REMOTE_CHECKOUT}:/workspace' \
   -v '${REMOTE_RUNS}:${REMOTE_RUNS}' \
   ${MOUNT_HF[@]+"${MOUNT_HF[@]}"} \
@@ -133,7 +155,6 @@ ssh "${YOMPUTE_HOST}" "docker run --rm --gpus all \
   -w /workspace \
   yompute/pytorch-gpu \
   bash -lc 'set -euo pipefail
-    python3 -m pip install --quiet transformers==4.44.2 sentencepiece accelerate bitsandbytes
     python3 experiments/kv-cache-shortcuts/run_kv_matrix.py'"
 
 echo "Done. Outputs under ${YOMPUTE_HOST}:${REMOTE_RUNS}/"

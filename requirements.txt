@@ -1,0 +1,2 @@
+pandas
+psycopg[binary]>=3.1  # optional: --postgres only

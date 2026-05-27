@@ -1,0 +1,30 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Local / IDE
+.cursor/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Experiment outputs & caches (regenerate on yompute / locally)
+outputs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Env / secrets
+.env
+.env.*
+*.pem

@@ -114,7 +114,7 @@ if [[ "${QUEUE_BACKGROUND:-0}" == "1" ]]; then
     -w /workspace \
     yompute/pytorch-gpu \
     bash -lc 'set -euo pipefail
-      python3 -m pip install --quiet transformers==4.44.2 sentencepiece
+      python3 -m pip install --quiet transformers==4.44.2 sentencepiece accelerate bitsandbytes
       python3 experiments/kv-cache-shortcuts/run_kv_matrix.py' \
     >'${REMOTE_LOG}' 2>&1 &"
   echo "Queued. Tail: ssh ${YOMPUTE_HOST} 'tail -f ${REMOTE_LOG}'"
@@ -133,7 +133,7 @@ ssh "${YOMPUTE_HOST}" "docker run --rm --gpus all \
   -w /workspace \
   yompute/pytorch-gpu \
   bash -lc 'set -euo pipefail
-    python3 -m pip install --quiet transformers==4.44.2 sentencepiece
+    python3 -m pip install --quiet transformers==4.44.2 sentencepiece accelerate bitsandbytes
     python3 experiments/kv-cache-shortcuts/run_kv_matrix.py'"
 
 echo "Done. Outputs under ${YOMPUTE_HOST}:${REMOTE_RUNS}/"

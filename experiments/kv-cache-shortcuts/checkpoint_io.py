@@ -89,12 +89,14 @@ def load_meta(path: Path) -> Dict[str, Any]:
 
 
 def nuke_vram(*objects: Any) -> None:
-    for obj in objects:
-        del obj
+    # Callers must drop their own references; this only releases transient locals and clears caches.
+    del objects
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+    if hasattr(torch, "mps") and torch.backends.mps.is_available():
+        torch.mps.empty_cache()
 
 
 def cache_size_bytes(past_key_values: Tuple[Any, ...]) -> int:

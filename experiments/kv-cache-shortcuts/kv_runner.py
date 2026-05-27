@@ -25,7 +25,6 @@ def rollout_from_cache(
                 input_ids=current,
                 past_key_values=pkv,
                 use_cache=True,
-                output_hidden_states=True,
             )
             logits = out.logits[:, -1, :].squeeze(0).detach().cpu()
             logits_steps.append(logits)
@@ -54,7 +53,6 @@ def teacher_forced_logits(
                 input_ids=current,
                 past_key_values=pkv,
                 use_cache=True,
-                output_hidden_states=True,
             )
             logits_steps.append(out.logits[:, -1, :].squeeze(0).detach().cpu())
             current = torch.tensor([[next_token]], dtype=torch.long, device=device)

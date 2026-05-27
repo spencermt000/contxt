@@ -108,7 +108,11 @@ def _capture_baseline(
     print(f"Saved baseline artifacts to {baseline_dir}")
     print(f"Prompt source_id={prompt_meta.get('source_id')} tokens={prompt_meta.get('prompt_num_tokens')}")
     print(f"Baseline preview: {generated_text[:200]}")
-    nuke_vram(model, tokenizer, base_pkv, out)
+    out = None
+    base_pkv = None
+    model = None
+    tokenizer = None
+    nuke_vram()
     return baseline_dir
 
 
@@ -137,7 +141,10 @@ def _run_variant_from_disk(
     save_json(rollout_tokens, variant_dir / "rollout_tokens.json")
     save_meta({"generated_text": generated_text}, variant_dir / "meta.json")
     print(f"Saved variant artifacts to {variant_dir}")
-    nuke_vram(model, tokenizer, pkv)
+    pkv = None
+    model = None
+    tokenizer = None
+    nuke_vram()
 
 
 def _compare_from_disk(out_root: Path, bits_levels: Sequence[int]) -> Dict[str, Any]:
@@ -228,7 +235,10 @@ def run_quantization_experiment(
                 kv_path=variant_dir / "kv_cache.pt",
                 meta=meta,
             )
-        nuke_vram(baseline_pkv)
+            q_pkv = None
+            nuke_vram()
+        baseline_pkv = None
+        nuke_vram()
 
     return _compare_from_disk(out_root, bits_levels)
 

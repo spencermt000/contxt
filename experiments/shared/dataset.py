@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
@@ -10,8 +11,25 @@ import torch
 from .eval_utils import compute_rank_of_target
 
 
-DEFAULT_PROMPTS_TRAIN_PATH = "/data/diffusion-ontop/datasets/prompts_diverse/train.jsonl"
-DEFAULT_PROMPTS_VAL_PATH = "/data/diffusion-ontop/datasets/prompts_diverse/val.jsonl"
+def resolve_stratum_data_root() -> Path:
+    """Data root for prompts/cache (STRATUM_DATA_ROOT or yompute default /workspace/data)."""
+    env = os.environ.get("STRATUM_DATA_ROOT")
+    if env:
+        return Path(env)
+    for candidate in (Path("/workspace/data"), Path("/data/diffusion-ontop/datasets")):
+        if (candidate / "prompts_diverse").is_dir():
+            return candidate
+    return Path("outputs/data")
+
+
+def prompts_diverse_path(split: str = "val") -> Path:
+    if split not in {"train", "val", "test"}:
+        raise ValueError(f"split must be train|val|test, got {split!r}")
+    return resolve_stratum_data_root() / "prompts_diverse" / f"{split}.jsonl"
+
+
+DEFAULT_PROMPTS_TRAIN_PATH = str(prompts_diverse_path("train"))
+DEFAULT_PROMPTS_VAL_PATH = str(prompts_diverse_path("val"))
 DEFAULT_CLASSIFIED_OUTPUT_PATH = "experiments/shared/classified_examples.json"
 
 
@@ -51,6 +69,19 @@ def load_real_data(path: str) -> List[Dict[str, str]]:
                 )
                 continue
 
+            # prompts_diverse on yompute: instruction + solution
+            if "instruction" in row and "solution" in row:
+                records.append(
+                    {
+                        "input_text": str(row["instruction"]),
+                        "expected_output_text": str(row["solution"]),
+                        "source_id": str(row.get("id", f"row_{line_no}")),
+                        "source": str(row.get("source", "")),
+                        "split": str(row.get("split", "")),
+                    }
+                )
+                continue
+
             # Allow prompt-style rows with "prompt" for later label injection.
             if "prompt" in row:
                 records.append(
@@ -67,6 +98,33 @@ def load_real_data(path: str) -> List[Dict[str, str]]:
                 "'input_text'+'expected_output_text' or 'prompt'."
             )
     return records
+
+
+def load_kv_prompt_example(
+    path: str | None = None,
+    *,
+    split: str = "val",
+    source_id: str | None = None,
+    index: int = 0,
+) -> Dict[str, str]:
+    """Load one row for KV-cache experiments from prompts_diverse JSONL."""
+    jsonl_path = path or str(prompts_diverse_path(split))
+    records = load_real_data(jsonl_path)
+    if not records:
+        raise ValueError(f"No records in {jsonl_path}")
+
+    if source_id is not None:
+        for rec in records:
+            if rec.get("source_id") == source_id:
+                return rec
+        raise ValueError(f"source_id {source_id!r} not found in {jsonl_path}")
+
+    if index < 0 or index >= len(records):
+        raise IndexError(f"index {index} out of range for {len(records)} records in {jsonl_path}")
+    rec = records[index]
+    if not str(rec.get("expected_output_text", "")).strip():
+        raise ValueError(f"Record {rec.get('source_id')} has empty expected_output_text")
+    return rec
 
 
 def generate_synthetic_examples(n: int = 100) -> List[Dict[str, str]]:

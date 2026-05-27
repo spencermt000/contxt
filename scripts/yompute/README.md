@@ -45,6 +45,12 @@ Optional env vars:
 | `HF_OFFLINE` | `0` | Set `1` to use `TRANSFORMERS_OFFLINE=1` (needs all models in cache) |
 | `QUEUE_BACKGROUND` | `0` | Set `1` to `nohup` the docker run on the host (log under `kv-cache-runs/matrix_*.log`) |
 | `MATRIX_MODELS` | (built-in list in `run_kv_matrix.py`) | Comma-separated HF ids; export before `queue_contxt_kv_matrix.sh` to override the default matrix |
+| `STRATUM_DATA_HOST_PATH` | `/data/diffusion-ontop/datasets` | Host path mounted read-only at `/workspace/data` (`STRATUM_DATA_ROOT`) |
+| `KV_PROMPTS_SPLIT` | `val` | `prompts_diverse/{split}.jsonl` |
+| `KV_PROMPT_ID` | (unset → first row) | Pin a row `id` from JSONL (same across models) |
+| `KV_PROMPT_INDEX` | `0` | Row index when `KV_PROMPT_ID` unset |
+
+KV experiments load prompts via `experiments/shared/dataset.load_real_data` / `load_kv_prompt_example` from **`prompts_diverse/*.jsonl`** (`instruction` + `solution`), not hardcoded palindrome text.
 
 The script updates `/data/contxt/checkout` from GitHub, then runs `run_kv_matrix.py` inside `yompute/pytorch-gpu` with GPU enabled.
 

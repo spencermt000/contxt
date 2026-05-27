@@ -31,50 +31,8 @@ from checkpoint_io import (
     save_pkv,
 )
 from kv_runner import rollout_from_cache, teacher_forced_logits
+from prompt_source import load_experiment_prompt
 from experiments.shared.model_loader import DEFAULT_MODEL_NAME, load_model
-
-
-def _conversation_messages() -> Tuple[List[Dict[str, str]], str]:
-    system_text = (
-        "You are a precise coding assistant. Follow instructions exactly, cite assumptions, "
-        "and prefer concise, testable answers. If uncertain, state uncertainty explicitly. "
-        "Avoid hallucinating APIs or file paths. Keep variable names descriptive and stable. "
-        "When writing code, prioritize readability over cleverness. Always keep side effects "
-        "minimal and document non-obvious trade-offs. "
-    ) * 16
-    user_text = (
-        "Write a short Python function that returns the nth triangular number and include "
-        "a one-line usage example."
-    )
-    known_good_response = (
-        "def triangular(n: int) -> int:\n"
-        "    return n * (n + 1) // 2\n\n"
-        "print(triangular(5))  # 15"
-    )
-    messages = [
-        {"role": "system", "content": system_text},
-        {"role": "user", "content": user_text},
-    ]
-    return messages, known_good_response
-
-
-def _build_prompt_ids(tokenizer: Any, messages: List[Dict[str, str]], min_system_tokens: int = 200) -> torch.Tensor:
-    if hasattr(tokenizer, "apply_chat_template"):
-        prompt_ids = tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            return_tensors="pt",
-        )
-        sys_ids = tokenizer(messages[0]["content"], add_special_tokens=False, return_tensors="pt")["input_ids"]
-    else:
-        prompt = f"System: {messages[0]['content']}\nUser: {messages[1]['content']}\nAssistant:"
-        prompt_ids = tokenizer(prompt, return_tensors="pt")["input_ids"]
-        sys_ids = tokenizer(messages[0]["content"], add_special_tokens=False, return_tensors="pt")["input_ids"]
-    if sys_ids.shape[-1] < min_system_tokens:
-        raise ValueError(
-            f"System message only has {sys_ids.shape[-1]} tokens; expected at least {min_system_tokens}."
-        )
-    return prompt_ids
 
 
 def _token_vectors_from_cache(x: torch.Tensor) -> torch.Tensor:
@@ -130,9 +88,8 @@ def _zero_out_layers(past_key_values: Tuple[Any, ...], layer_indices: Iterable[i
 def _capture_baseline(model_name: str, device: str, out_root: Path) -> None:
     baseline_dir = ensure_run_dir(out_root / "baseline")
     model, tokenizer = load_model(model_name=model_name, device=device)
-    messages, known_good_response = _conversation_messages()
-    prompt_ids = _build_prompt_ids(tokenizer, messages, min_system_tokens=200).to(next(model.parameters()).device)
-    continuation_ids = tokenizer.encode(known_good_response, add_special_tokens=False)
+    prompt_ids, continuation_ids, prompt_meta = load_experiment_prompt(tokenizer, model_name)
+    prompt_ids = prompt_ids.to(next(model.parameters()).device)
     if len(continuation_ids) < 2:
         raise ValueError("Known-good response must produce at least 2 tokens for comparison.")
 
@@ -159,10 +116,11 @@ def _capture_baseline(model_name: str, device: str, out_root: Path) -> None:
             "continuation_ids": continuation_ids,
             "num_new_tokens": num_new_tokens,
             "generated_text": tokenizer.decode(rollout_tokens, skip_special_tokens=True),
+            **prompt_meta,
         },
         baseline_dir / "meta.json",
     )
-    print(f"Saved baseline to {baseline_dir}")
+    print(f"Saved baseline to {baseline_dir} (source_id={prompt_meta.get('source_id')})")
     nuke_vram(model, tokenizer, full_pkv, prefix_outputs)
 
 

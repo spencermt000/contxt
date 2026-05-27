@@ -35,40 +35,8 @@ from checkpoint_io import (
     token_match_rate,
 )
 from kv_runner import rollout_from_cache, teacher_forced_logits
+from prompt_source import load_experiment_prompt
 from experiments.shared.model_loader import DEFAULT_MODEL_NAME, load_model
-
-
-def _conversation_messages() -> Tuple[List[Dict[str, str]], str]:
-    system_text = (
-        "You are a careful assistant. Be precise, avoid fabricated details, prefer concise "
-        "answers, and provide deterministic outputs for coding tasks. "
-    ) * 18
-    user_text = (
-        "Write a Python function that checks whether a string is a palindrome while ignoring "
-        "case and non-alphanumeric characters. Include one usage example."
-    )
-    known_good_response = (
-        "import re\n\n"
-        "def is_palindrome(text: str) -> bool:\n"
-        "    cleaned = re.sub(r'[^a-z0-9]', '', text.lower())\n"
-        "    return cleaned == cleaned[::-1]\n\n"
-        "print(is_palindrome('A man, a plan, a canal: Panama'))  # True"
-    )
-    messages = [{"role": "system", "content": system_text}, {"role": "user", "content": user_text}]
-    return messages, known_good_response
-
-
-def _build_prompt_ids(tokenizer: Any, messages: List[Dict[str, str]], min_system_tokens: int = 200) -> torch.Tensor:
-    if hasattr(tokenizer, "apply_chat_template"):
-        prompt_ids = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt")
-        sys_ids = tokenizer(messages[0]["content"], add_special_tokens=False, return_tensors="pt")["input_ids"]
-    else:
-        prompt = f"System: {messages[0]['content']}\nUser: {messages[1]['content']}\nAssistant:"
-        prompt_ids = tokenizer(prompt, return_tensors="pt")["input_ids"]
-        sys_ids = tokenizer(messages[0]["content"], add_special_tokens=False, return_tensors="pt")["input_ids"]
-    if sys_ids.shape[-1] < min_system_tokens:
-        raise ValueError(f"System message has {sys_ids.shape[-1]} tokens; expected >= {min_system_tokens}.")
-    return prompt_ids
 
 
 def _uniform_quantize_dequantize(tensor: torch.Tensor, bits: int) -> torch.Tensor:
@@ -104,9 +72,8 @@ def _capture_baseline(
 ) -> Path:
     baseline_dir = ensure_run_dir(out_root / "baseline")
     model, tokenizer = load_model(model_name=model_name, device=device)
-    messages, known_good_response = _conversation_messages()
-    prompt_ids = _build_prompt_ids(tokenizer, messages).to(next(model.parameters()).device)
-    continuation_ids = tokenizer.encode(known_good_response, add_special_tokens=False)
+    prompt_ids, continuation_ids, prompt_meta = load_experiment_prompt(tokenizer, model_name)
+    prompt_ids = prompt_ids.to(next(model.parameters()).device)
 
     with torch.no_grad():
         out = model(
@@ -134,10 +101,12 @@ def _capture_baseline(
             "generated_text": generated_text,
             "cache_size_bytes": cache_size_bytes(base_pkv),
             "max_new_tokens": max_new_tokens,
+            **prompt_meta,
         },
         baseline_dir / "meta.json",
     )
     print(f"Saved baseline artifacts to {baseline_dir}")
+    print(f"Prompt source_id={prompt_meta.get('source_id')} tokens={prompt_meta.get('prompt_num_tokens')}")
     print(f"Baseline preview: {generated_text[:200]}")
     nuke_vram(model, tokenizer, base_pkv, out)
     return baseline_dir

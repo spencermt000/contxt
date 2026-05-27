@@ -7,6 +7,7 @@ REMOTE_CONTXT="${REMOTE_CONTXT:-/data/contxt}"
 REMOTE_CHECKOUT="${REMOTE_CONTXT}/checkout"
 REMOTE_RUNS="${REMOTE_CONTXT}/kv-cache-runs"
 HF_CACHE_HOST_PATH="${HF_CACHE_HOST_PATH:-/data/diffusion-ontop/datasets/hf_cache}"
+STRATUM_DATA_HOST_PATH="${STRATUM_DATA_HOST_PATH:-/data/diffusion-ontop/datasets}"
 HF_OFFLINE="${HF_OFFLINE:-0}"
 
 # Default: pull from GitHub (public clone; no Mac rsync).
@@ -70,6 +71,27 @@ else
   echo "WARN: HF cache dir missing on host: ${HF_CACHE_HOST_PATH} (models may download from network)"
 fi
 
+MOUNT_DATA=()
+PROMPT_ENV=()
+if ssh "${YOMPUTE_HOST}" "test -d '${STRATUM_DATA_HOST_PATH}/prompts_diverse'"; then
+  MOUNT_DATA+=( -v "${STRATUM_DATA_HOST_PATH}:/workspace/data:ro" )
+  PROMPT_ENV+=( -e "STRATUM_DATA_ROOT=/workspace/data" )
+  echo "prompts_diverse mount: ${STRATUM_DATA_HOST_PATH} -> /workspace/data (ro)"
+else
+  echo "WARN: prompts_diverse missing at ${STRATUM_DATA_HOST_PATH}/prompts_diverse — KV runs will fail without JSONL"
+fi
+
+# Same row across models unless overridden (first val row by default).
+if [[ -n "${KV_PROMPT_ID:-}" ]]; then
+  PROMPT_ENV+=( -e "KV_PROMPT_ID=${KV_PROMPT_ID}" )
+fi
+if [[ -n "${KV_PROMPTS_SPLIT:-}" ]]; then
+  PROMPT_ENV+=( -e "KV_PROMPTS_SPLIT=${KV_PROMPTS_SPLIT}" )
+fi
+if [[ -n "${KV_PROMPT_INDEX:-}" ]]; then
+  PROMPT_ENV+=( -e "KV_PROMPT_INDEX=${KV_PROMPT_INDEX}" )
+fi
+
 echo "Starting docker matrix on ${YOMPUTE_HOST} …"
 REMOTE_LOG="${REMOTE_RUNS}/matrix_$(date +%Y%m%d_%H%M%S).log"
 
@@ -84,7 +106,9 @@ if [[ "${QUEUE_BACKGROUND:-0}" == "1" ]]; then
     -v '${REMOTE_CHECKOUT}:/workspace' \
     -v '${REMOTE_RUNS}:${REMOTE_RUNS}' \
     ${MOUNT_HF[@]+"${MOUNT_HF[@]}"} \
+    ${MOUNT_DATA[@]+"${MOUNT_DATA[@]}"} \
     -e CONTXT_KV_ROOT='${REMOTE_RUNS}' \
+    ${PROMPT_ENV[@]+"${PROMPT_ENV[@]}"} \
     ${MATRIX_ENV[@]+"${MATRIX_ENV[@]}"} \
     ${OFFLINE_ARGS[@]+"${OFFLINE_ARGS[@]}"} \
     -w /workspace \
@@ -101,7 +125,9 @@ ssh "${YOMPUTE_HOST}" "docker run --rm --gpus all \
   -v '${REMOTE_CHECKOUT}:/workspace' \
   -v '${REMOTE_RUNS}:${REMOTE_RUNS}' \
   ${MOUNT_HF[@]+"${MOUNT_HF[@]}"} \
+  ${MOUNT_DATA[@]+"${MOUNT_DATA[@]}"} \
   -e CONTXT_KV_ROOT='${REMOTE_RUNS}' \
+  ${PROMPT_ENV[@]+"${PROMPT_ENV[@]}"} \
   ${MATRIX_ENV[@]+"${MATRIX_ENV[@]}"} \
   ${OFFLINE_ARGS[@]+"${OFFLINE_ARGS[@]}"} \
   -w /workspace \

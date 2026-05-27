@@ -6,7 +6,7 @@ YOMPUTE_HOST="${YOMPUTE_HOST:-root@192.168.4.51}"
 REMOTE_CONTXT="${REMOTE_CONTXT:-/data/contxt}"
 REMOTE_CHECKOUT="${REMOTE_CONTXT}/checkout"
 REMOTE_RUNS="${REMOTE_CONTXT}/kv-cache-runs"
-HF_CACHE_HOST_PATH="${HF_CACHE_HOST_PATH:-/data/diffusion-ontop/datasets/hf_cache}"
+HF_CACHE_HOST_PATH="${HF_CACHE_HOST_PATH:-/data2/LLMs/hf_cache}"
 STRATUM_DATA_HOST_PATH="${STRATUM_DATA_HOST_PATH:-/data/diffusion-ontop/datasets}"
 HF_OFFLINE="${HF_OFFLINE:-0}"
 

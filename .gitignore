@@ -17,6 +17,7 @@ build/
 .vscode/
 *.swp
 .DS_Store
+.claude/
 
 # Experiment outputs & caches (regenerate on yompute / locally)
 outputs/

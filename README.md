@@ -10,13 +10,13 @@ Experiments and utilities for context / KV-cache / model-behavior work.
 
 ## Yompute
 
-From the repo root:
+Push changes to **GitHub**, then from the repo root:
 
 ```bash
 ./scripts/yompute/queue_contxt_kv_matrix.sh
 ```
 
-Artifacts on the GPU host default to `/data/contxt/` (see yompute README).
+Yompute pulls **`main`** from this repo into `/data/contxt/checkout` by default (see `scripts/yompute/README.md`). Artifacts go under `/data/contxt/kv-cache-runs/`.
 
 ## Requirements
 

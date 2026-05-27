@@ -18,9 +18,19 @@ Per model (example `Qwen/Qwen2.5-0.5B-Instruct` → slug `Qwen_Qwen2.5-0.5B-Inst
   sliding_quantization/
 ```
 
+## Code sync: GitHub → yompute (default)
+
+The queue script **clones or pulls** `contxt` on the GPU host into `/data/contxt/checkout` from GitHub (shallow `main` by default). Push from your Mac first, then run the queue script.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `SYNC_MODE` | `git` | `git` = clone/pull from `CONTXT_GIT_URL`; `rsync` = copy from your Mac (legacy) |
+| `CONTXT_GIT_URL` | `https://github.com/spencermt000/contxt.git` | Repo to clone on yompute |
+| `CONTXT_GIT_REF` | `main` | Branch to checkout |
+
 ## Queue KV matrix (all models)
 
-From your Mac, in the **contxt** repo root:
+From your Mac, in the **contxt** repo root (after `git push`):
 
 ```bash
 ./scripts/yompute/queue_contxt_kv_matrix.sh
@@ -36,7 +46,7 @@ Optional env vars:
 | `QUEUE_BACKGROUND` | `0` | Set `1` to `nohup` the docker run on the host (log under `kv-cache-runs/matrix_*.log`) |
 | `MATRIX_MODELS` | (built-in list in `run_kv_matrix.py`) | Comma-separated HF ids; export before `queue_contxt_kv_matrix.sh` to override the default matrix |
 
-The script `rsync`s the repo to `/data/contxt/checkout` and runs `run_kv_matrix.py` inside `yompute/pytorch-gpu` with GPU enabled.
+The script updates `/data/contxt/checkout` from GitHub, then runs `run_kv_matrix.py` inside `yompute/pytorch-gpu` with GPU enabled.
 
 ## DeepSeek instruct (optional)
 

@@ -142,36 +142,59 @@ def _hidden_size(model: Any) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Hidden state capture (all layers)
+# Hook-based hidden state capture with disk offload
 # ---------------------------------------------------------------------------
 
-def _capture_all_layers(
+def _capture_and_offload(
     model: Any,
     input_ids: torch.Tensor,
-) -> Tuple[torch.Tensor, List[torch.Tensor], int]:
-    """Return (last_logits, per_layer_hidden_at_last_pos, greedy_id)."""
+    save_path: Path,
+    forced_id: Optional[int] = None,
+) -> Tuple[torch.Tensor, int]:
+    """Forward pass using hooks to capture per-layer last-pos hidden states.
+
+    Hooks move tensors to CPU immediately so GPU memory is freed per-layer.
+    Result written to save_path; del captured tensors from CPU RAM.
+    Returns (logits [vocab] on CPU, greedy_id).
+
+    With forced_id: appends that token and captures at position -2.
+    Load hidden states: torch.load(save_path) → List[Tensor], one per layer.
+    """
+    layers = _get_transformer_layers(model)
+    n = len(layers)
+    captured: List[Optional[torch.Tensor]] = [None] * n
+    pos = -2 if forced_id is not None else -1
+
+    def _make_hook(idx):
+        def hook(module, inputs, output):
+            h = output[0] if isinstance(output, tuple) else output
+            captured[idx] = h[0, pos, :].float().cpu()
+        return hook
+
+    handles = [layer.register_forward_hook(_make_hook(i)) for i, layer in enumerate(layers)]
+
+    if forced_id is not None:
+        device = input_ids.device
+        extra = torch.tensor([[forced_id]], dtype=torch.long, device=device)
+        feed = torch.cat([input_ids, extra], dim=1)
+    else:
+        feed = input_ids
+
     with torch.no_grad():
-        out = model(input_ids=input_ids, output_hidden_states=True, use_cache=False)
-    logits = out.logits[0, -1, :].float()
+        out = model(input_ids=feed, use_cache=False)
+    for h in handles:
+        h.remove()
+
+    logits = out.logits[0, pos, :].float().cpu()
     greedy_id = int(torch.argmax(logits).item())
-    # hidden_states: tuple of (n_layers+1) tensors [batch, seq, hidden]
-    # Index 0 = embedding output; 1..n_layers = layer outputs
-    per_layer = [hs[0, -1, :].float() for hs in out.hidden_states[1:]]
-    return logits, per_layer, greedy_id
+    del out
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-
-def _capture_forced_layers(
-    model: Any,
-    input_ids: torch.Tensor,
-    correct_id: int,
-) -> List[torch.Tensor]:
-    """Force the correct first token, capture all layer hidden states at position -2."""
-    device = input_ids.device
-    full = torch.cat([input_ids, torch.tensor([[correct_id]], device=device, dtype=torch.long)], dim=1)
-    with torch.no_grad():
-        out = model(input_ids=full, output_hidden_states=True, use_cache=False)
-    # Position -2 is the last token of the original prompt (just before the forced token)
-    return [hs[0, -2, :].float() for hs in out.hidden_states[1:]]
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(captured, save_path)
+    del captured
+    return logits, greedy_id
 
 
 # ---------------------------------------------------------------------------
@@ -301,12 +324,16 @@ def run_strategy(
     use_jacobi: bool,
     max_examples: Optional[int],
     device_str: str,
+    tmp_dir: Path,
 ) -> Dict[str, Any]:
     n_layers = adapter.n_layers
     log_path = out_dir / f"per_example_{strategy}.jsonl"
     holdout_path = out_dir / f"holdout_evals_{strategy}.json"
     holdout_history = [{"step": 0, "type": "baseline", **holdout_baseline}]
     snapshot_version = 0
+
+    wrong_path = tmp_dir / "hidden_wrong.pt"
+    correct_path = tmp_dir / "hidden_correct.pt"
 
     if max_examples is not None:
         tier_examples = tier_examples[:max_examples]
@@ -326,11 +353,14 @@ def run_strategy(
 
         t0 = time.time()
 
-        # Capture hidden states
-        logits_before, h_wrong_layers, wrong_id = _capture_all_layers(model, input_ids)
-        h_correct_layers = _capture_forced_layers(model, input_ids, correct_id)
-
+        # Capture hidden states to disk, free VRAM between passes
+        logits_before, _ = _capture_and_offload(model, input_ids, wrong_path)
         rank_before, prob_before = compute_rank_of_target(logits_before, correct_id)
+        _capture_and_offload(model, input_ids, correct_path, forced_id=correct_id)
+
+        # Load from disk for update computation (CPU tensors, no VRAM)
+        h_wrong_layers: List[torch.Tensor] = torch.load(wrong_path)
+        h_correct_layers: List[torch.Tensor] = torch.load(correct_path)
 
         # Compute delta_h per layer
         delta_h_layers = [h_correct_layers[l] - h_wrong_layers[l] for l in range(n_layers)]
@@ -348,6 +378,8 @@ def run_strategy(
             adapter.accumulate(l_idx, delta_W)
             example_update_norm += float(delta_W.norm().item()) ** 2
         example_update_norm = example_update_norm ** 0.5
+
+        del h_wrong_layers, h_correct_layers, delta_h_layers
 
         # Rank after
         rank_after, prob_after = _rank_with_adapter(model, adapter, input_ids, correct_id, active_layers)
@@ -456,15 +488,22 @@ def run_layer_experiment(
     max_examples: Optional[int] = None,
     use_jacobi: bool = False,
     device: str = "auto",
+    classify_cache_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
     summary_path = out_dir / "summary.json"
-    cache_path = out_dir / "classified.json"
+    tmp_dir = out_dir / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Shared classification cache: default to parent dir so logit/layer_local/direct share it
+    if classify_cache_path is None:
+        classify_cache_path = out_dir.parent / "classified.json"
 
     print(f"\n{'='*72}")
     print(f"Layer-Local Activation Matching Experiment")
     print(f"Model: {model_name}  lr={lr}  strategies={strategies}")
     print(f"Output: {out_dir}")
+    print(f"Classify cache: {classify_cache_path}")
     print(f"{'='*72}\n")
 
     model, tokenizer = load_model(model_name, device)
@@ -478,7 +517,7 @@ def run_layer_experiment(
     holdout_examples = all_val[:holdout_n]
     print(f"Loaded {len(all_train)} train, holdout_n={holdout_n}")
 
-    tiers = _classify_examples(model, tokenizer, all_train, cache_path)
+    tiers = _classify_examples(model, tokenizer, all_train, classify_cache_path)
     for tier, exs in tiers.items():
         print(f"  {tier}: {len(exs)} examples")
 
@@ -522,6 +561,7 @@ def run_layer_experiment(
                 use_jacobi=use_jacobi,
                 max_examples=max_examples,
                 device_str=device_str,
+                tmp_dir=tmp_dir,
             )
             strategy_results[key] = result
 
@@ -592,6 +632,8 @@ def main() -> None:
         default=list(STRATEGIES),
         help="Which strategies to run (default: all three).",
     )
+    parser.add_argument("--classify-cache", default=None,
+                        help="Path to shared classified.json (default: out_dir/../classified.json)")
     parser.add_argument("--device", default=os.environ.get("KV_DEVICE", "auto"))
     parser.add_argument("--jacobi", action="store_true")
     args = parser.parse_args()
@@ -603,6 +645,8 @@ def main() -> None:
 
     train_path = args.data_train or str(prompts_diverse_path("train"))
     val_path = args.data_val or str(prompts_diverse_path("val"))
+
+    classify_cache = Path(args.classify_cache) if args.classify_cache else None
 
     run_layer_experiment(
         model_name=args.model,
@@ -616,6 +660,7 @@ def main() -> None:
         max_examples=args.max_examples,
         use_jacobi=args.jacobi,
         device=args.device,
+        classify_cache_path=classify_cache,
     )
 
 

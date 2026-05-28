@@ -50,6 +50,7 @@ from experiments.shared.model_loader import load_model
 from experiments.nudges.logit import LogitAdapter, compute_logit_nudge
 from experiments.nudges.layer_local import (
     LayerAdapter,
+    _capture_and_offload,
     _get_transformer_layers,
     _n_layers,
     _hidden_size,
@@ -156,33 +157,6 @@ class PipelineAdapter:
             "layer": self.layer.state_dict(),
             "direct": self.direct.state_dict(),
         }
-
-
-# ---------------------------------------------------------------------------
-# Hidden state capture
-# ---------------------------------------------------------------------------
-
-def _get_all_states(
-    model: Any, input_ids: torch.Tensor
-) -> Tuple[torch.Tensor, List[torch.Tensor], int]:
-    with torch.no_grad():
-        out = model(input_ids=input_ids, output_hidden_states=True, use_cache=False)
-    logits = out.logits[0, -1, :].float()
-    greedy_id = int(torch.argmax(logits).item())
-    per_layer = [hs[0, -1, :].float() for hs in out.hidden_states[1:]]
-    return logits, per_layer, greedy_id
-
-
-def _get_forced_states(
-    model: Any, input_ids: torch.Tensor, correct_id: int
-) -> Tuple[torch.Tensor, List[torch.Tensor]]:
-    device = input_ids.device
-    full = torch.cat([input_ids, torch.tensor([[correct_id]], device=device, dtype=torch.long)], dim=1)
-    with torch.no_grad():
-        out = model(input_ids=full, output_hidden_states=True, use_cache=False)
-    logits = out.logits[0, -2, :].float()
-    per_layer = [hs[0, -2, :].float() for hs in out.hidden_states[1:]]
-    return logits, per_layer
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +300,7 @@ def route_and_correct(
     device_str: str,
     use_jacobi: bool,
     layer_strategy: str,
+    tmp_dir: Path,
 ) -> Dict[str, Any]:
     source_id = ex.get("id", ex.get("source_id", f"idx_{step_i}"))
     input_ids = tokenizer.encode(ex["input_text"], return_tensors="pt").to(device_str)
@@ -336,7 +311,11 @@ def route_and_correct(
     t0 = time.time()
     forward_passes = 0
 
-    logits_before, h_wrong_layers, wrong_id = _get_all_states(model, input_ids)
+    # Capture hidden states with hooks; offload to disk to free VRAM between passes
+    wrong_path = tmp_dir / "hidden_wrong.pt"
+    correct_path = tmp_dir / "hidden_correct.pt"
+
+    logits_before, wrong_id = _capture_and_offload(model, input_ids, wrong_path)
     forward_passes += 1
     rank_before, prob_before = compute_rank_of_target(logits_before, correct_id)
 
@@ -349,8 +328,12 @@ def route_and_correct(
     else:
         tier = "full_training"
 
-    _forced_logits, h_correct_layers = _get_forced_states(model, input_ids, correct_id)
+    _capture_and_offload(model, input_ids, correct_path, forced_id=correct_id)
     forward_passes += 1
+
+    # Load from disk (CPU tensors, no VRAM)
+    h_wrong_layers: List[torch.Tensor] = torch.load(wrong_path)
+    h_correct_layers: List[torch.Tensor] = torch.load(correct_path)
 
     correction_applied = "none"
     update_norm = 0.0
@@ -421,6 +404,8 @@ def route_and_correct(
         correction_applied = "direct_activation"
         rank_after = rank_after_t3
 
+    del h_wrong_layers, h_correct_layers
+
     corrected = rank_after < rank_before
     rank_1_achieved = rank_after == 1
 
@@ -481,18 +466,25 @@ def run_pipeline(
     use_jacobi: bool = False,
     layer_strategy: str = "top_layers_only",
     device: str = "auto",
+    classify_cache_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "per_example_log.jsonl"
     holdout_path = out_dir / "holdout_evals.json"
     summary_path = out_dir / "summary.json"
-    cache_path = out_dir / "classified.json"
     full_training_queue_path = out_dir / "full_training_queue.jsonl"
+    tmp_dir = out_dir / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Shared classification cache: default to parent dir so logit/layer_local/direct share it
+    if classify_cache_path is None:
+        classify_cache_path = out_dir.parent / "classified.json"
 
     print(f"\n{'='*72}")
     print(f"Three-Tier Direct Activation Pipeline")
     print(f"Model: {model_name}  logit_lr={logit_lr}  layer_lr={layer_lr}")
     print(f"Output: {out_dir}")
+    print(f"Classify cache: {classify_cache_path}")
     print(f"{'='*72}\n")
 
     model, tokenizer = load_model(model_name, device)
@@ -506,7 +498,7 @@ def run_pipeline(
     all_val = load_real_data(data_val_path)
     holdout_examples = all_val[:holdout_n]
 
-    tiers = _classify_examples(model, tokenizer, all_train, cache_path)
+    tiers = _classify_examples(model, tokenizer, all_train, classify_cache_path)
     for t, exs in tiers.items():
         print(f"  {t}: {len(exs)} examples")
 
@@ -545,6 +537,7 @@ def run_pipeline(
             tier_override=tier_name, n_layers=n_layers, vocab_size=vocab_size,
             logit_lr=logit_lr, layer_lr=layer_lr, device_str=device_str,
             use_jacobi=use_jacobi, layer_strategy=layer_strategy,
+            tmp_dir=tmp_dir,
         )
 
         if record.get("skipped"):
@@ -719,6 +712,8 @@ def main() -> None:
         choices=("all_layers", "top_layers_only", "max_delta_layers"),
         default="top_layers_only",
     )
+    parser.add_argument("--classify-cache", default=None,
+                        help="Path to shared classified.json (default: out_dir/../classified.json)")
     parser.add_argument("--device", default=os.environ.get("KV_DEVICE", "auto"))
     parser.add_argument("--jacobi", action="store_true")
     args = parser.parse_args()
@@ -730,6 +725,8 @@ def main() -> None:
 
     train_path = args.data_train or str(prompts_diverse_path("train"))
     val_path = args.data_val or str(prompts_diverse_path("val"))
+
+    classify_cache = Path(args.classify_cache) if args.classify_cache else None
 
     run_pipeline(
         model_name=args.model,
@@ -744,6 +741,7 @@ def main() -> None:
         use_jacobi=args.jacobi,
         layer_strategy=args.layer_strategy,
         device=args.device,
+        classify_cache_path=classify_cache,
     )
 
 

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import sys
 import time
@@ -37,7 +36,7 @@ for _p in (str(_REPO), str(_SHARED.parent)):
         sys.path.insert(0, _p)
 
 from experiments.shared.dataset import load_real_data, prompts_diverse_path, split_by_difficulty
-from experiments.shared.eval_utils import compute_rank_of_target, eval_on_examples, save_snapshot
+from experiments.shared.eval_utils import compute_rank_of_target, eval_on_examples
 from experiments.shared.model_loader import load_model
 
 # ---------------------------------------------------------------------------
@@ -83,30 +82,69 @@ class LogitAdapter:
 
 
 # ---------------------------------------------------------------------------
-# Hidden state capture
+# Model architecture helper (needed for hook-based capture)
+# ---------------------------------------------------------------------------
+
+def _get_transformer_layers(model: Any) -> List[Any]:
+    for attr in ("model", "transformer"):
+        base = getattr(model, attr, None)
+        if base is not None:
+            for layers_attr in ("layers", "h", "blocks"):
+                layers = getattr(base, layers_attr, None)
+                if layers is not None:
+                    return list(layers)
+    raise RuntimeError("Cannot find transformer layers in model.")
+
+
+# ---------------------------------------------------------------------------
+# Hidden state capture — hook-based, last layer only, frees VRAM immediately
 # ---------------------------------------------------------------------------
 
 def _get_last_hidden(model: Any, input_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, int]:
-    """Run model, return (last_logits [vocab], last_hidden [hidden], greedy_token_id)."""
+    """Run model, return (last_logits [vocab] CPU, last_hidden [hidden] CPU, greedy_token_id)."""
+    last_layer = _get_transformer_layers(model)[-1]
+    captured: Dict[str, torch.Tensor] = {}
+
+    def hook(module, inputs, output):
+        h = output[0] if isinstance(output, tuple) else output
+        captured["h"] = h[0, -1, :].float().cpu()
+
+    handle = last_layer.register_forward_hook(hook)
     with torch.no_grad():
-        out = model(input_ids=input_ids, output_hidden_states=True, use_cache=False)
-    logits = out.logits[0, -1, :].float()
-    hidden = out.hidden_states[-1][0, -1, :].float()
+        out = model(input_ids=input_ids, use_cache=False)
+    handle.remove()
+
+    logits = out.logits[0, -1, :].float().cpu()
     greedy_id = int(torch.argmax(logits).item())
-    return logits, hidden, greedy_id
+    del out
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return logits, captured["h"], greedy_id
 
 
 def _get_forced_last_hidden(model: Any, input_ids: torch.Tensor, correct_id: int) -> torch.Tensor:
-    """Force the correct token as next input, return the resulting last hidden state."""
+    """Force the correct token as next input, return the resulting last hidden state (CPU)."""
+    last_layer = _get_transformer_layers(model)[-1]
+    captured: Dict[str, torch.Tensor] = {}
+
+    def hook(module, inputs, output):
+        h = output[0] if isinstance(output, tuple) else output
+        captured["h"] = h[0, -2, :].float().cpu()
+
+    handle = last_layer.register_forward_hook(hook)
     device = input_ids.device
     next_input = torch.tensor([[correct_id]], dtype=torch.long, device=device)
-    # Run full sequence + correct token to get the hidden state "had we been right"
     full_input = torch.cat([input_ids, next_input], dim=1)
     with torch.no_grad():
-        out = model(input_ids=full_input, output_hidden_states=True, use_cache=False)
-    # Hidden state at position -2 (before the forced correct token) — this is the
-    # representation the model would have used to emit the correct token
-    return out.hidden_states[-1][0, -2, :].float()
+        out = model(input_ids=full_input, use_cache=False)
+    handle.remove()
+
+    del out
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return captured["h"]
 
 
 # ---------------------------------------------------------------------------
@@ -243,17 +281,22 @@ def run_logit_experiment(
     max_examples: Optional[int] = None,
     use_jacobi: bool = False,
     device: str = "auto",
+    classify_cache_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "per_example_log.jsonl"
     holdout_path = out_dir / "holdout_evals.json"
     summary_path = out_dir / "summary.json"
-    cache_path = out_dir / "classified.json"
+
+    # Shared classification cache: default to parent dir so logit/layer_local/direct share it
+    if classify_cache_path is None:
+        classify_cache_path = out_dir.parent / "classified.json"
 
     print(f"\n{'='*72}")
     print(f"Logit Nudge Experiment")
     print(f"Model: {model_name}  lr={lr}  snapshot_every={snapshot_every}")
     print(f"Output: {out_dir}")
+    print(f"Classify cache: {classify_cache_path}")
     print(f"{'='*72}\n")
 
     model, tokenizer = load_model(model_name, device)
@@ -266,7 +309,7 @@ def run_logit_experiment(
     print(f"Loaded {len(all_train)} train, {len(all_val)} val; holdout_n={holdout_n}")
 
     # Classify
-    tiers = _classify_examples(model, tokenizer, all_train, cache_path)
+    tiers = _classify_examples(model, tokenizer, all_train, classify_cache_path)
     for tier, exs in tiers.items():
         print(f"  {tier}: {len(exs)} examples")
 
@@ -308,24 +351,21 @@ def run_logit_experiment(
 
             t0 = time.time()
 
-            # --- Rank before (no adapter) ---
+            # Hook-based capture frees VRAM immediately after each pass
             logits_before, h_wrong, wrong_id = _get_last_hidden(model, input_ids)
             rank_before, prob_before = compute_rank_of_target(logits_before, correct_id)
 
-            # --- Compute nudge ---
             h_correct = _get_forced_last_hidden(model, input_ids, correct_id)
             delta_W = compute_logit_nudge(h_wrong, h_correct, wrong_id, correct_id, vocab_size, lr)
             update_norm = float(delta_W.norm().item())
 
-            # Apply to adapter
             adapter.accumulate(delta_W)
 
-            # --- Rank after (with adapter) ---
             rank_after, prob_after = _rank_with_adapter(model, adapter, input_ids, correct_id)
             corrected = rank_after < rank_before
             elapsed = time.time() - t0
 
-            # --- Jacobi ---
+            # Jacobi
             jacobi_record: Optional[Dict] = None
             if use_jacobi:
                 disagreements, predicted = jacobi_iteration(model, input_ids, correct_ids[:4])
@@ -373,11 +413,9 @@ def run_logit_experiment(
                     f"norm={adapter.total_norm:.4f}"
                 )
 
-            # Append to log
             with log_path.open("a") as f:
                 f.write(json.dumps(record) + "\n")
 
-            # Snapshot + holdout eval
             if (step_i + 1) % snapshot_every == 0:
                 snapshot_version += 1
                 _save_adapter_snapshot(adapter, out_dir, snapshot_version)
@@ -482,6 +520,8 @@ def main() -> None:
     parser.add_argument("--snapshot-every", type=int, default=50)
     parser.add_argument("--holdout-n", type=int, default=50)
     parser.add_argument("--max-examples", type=int, default=None)
+    parser.add_argument("--classify-cache", default=None,
+                        help="Path to shared classified.json (default: out_dir/../classified.json)")
     parser.add_argument("--device", default=os.environ.get("KV_DEVICE", "auto"))
     parser.add_argument("--jacobi", action="store_true")
     args = parser.parse_args()
@@ -494,6 +534,8 @@ def main() -> None:
     train_path = args.data_train or str(prompts_diverse_path("train"))
     val_path = args.data_val or str(prompts_diverse_path("val"))
 
+    classify_cache = Path(args.classify_cache) if args.classify_cache else None
+
     run_logit_experiment(
         model_name=args.model,
         out_dir=out_dir,
@@ -505,6 +547,7 @@ def main() -> None:
         max_examples=args.max_examples,
         use_jacobi=args.jacobi,
         device=args.device,
+        classify_cache_path=classify_cache,
     )
 
 

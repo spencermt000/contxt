@@ -1,0 +1,8 @@
+FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
+
+RUN pip install --no-cache-dir \
+    transformers>=4.38.0 \
+    bitsandbytes>=0.42.0 \
+    accelerate>=0.27.0 \
+    tokenizers \
+    sentencepiece

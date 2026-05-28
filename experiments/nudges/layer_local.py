@@ -636,6 +636,7 @@ def main() -> None:
                         help="Path to shared classified.json (default: out_dir/../classified.json)")
     parser.add_argument("--device", default=os.environ.get("KV_DEVICE", "auto"))
     parser.add_argument("--jacobi", action="store_true")
+    parser.add_argument("--config", default=None, help="(ignored; for Airflow DAG compatibility)")
     args = parser.parse_args()
 
     slug = args.model.replace("/", "_")
@@ -662,6 +663,7 @@ def main() -> None:
         device=args.device,
         classify_cache_path=classify_cache,
     )
+    print("yompute_status=success")
 
 
 if __name__ == "__main__":
